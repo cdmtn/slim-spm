@@ -3,6 +3,10 @@
 	"version": "1.0.0",
 	"description": "Slim Package Manager: installs, locks and publishes Slim packages",
 	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/cdmtn/slim-spm.git"
+	},
 	"engines": {
 		"node": ">=22.12.0"
 	},
@@ -14,7 +18,10 @@
 		"README.md"
 	],
 	"scripts": {
-		"test": "node --test test/*.test.mjs"
+		"test": "node --test test/*.test.mjs",
+		"release:patch": "npm version patch && git push --follow-tags && npm publish",
+		"release:minor": "npm version minor && git push --follow-tags && npm publish",
+		"release:major": "npm version major && git push --follow-tags && npm publish"
 	},
 	"keywords": [
 		"slim",
