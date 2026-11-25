@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import path from "node:path";
+import { createHash } from "node:crypto";
 
 export const GITHUB_API = "https://api.github.com";
 export const API_VERSION = "2026-03-10";
@@ -25,74 +25,81 @@ export async function githubRequest(token, url, options = {}) {
     const data = response.status === 204 ? null : await response.json().catch(() => null);
 
     if (!response.ok) {
-        throw new Error(data?.message || `GitHub API error: ${response.status}`);
+        const error = new Error(data?.message || `GitHub API error: ${response.status}`);
+        error.status = response.status;
+        throw error;
     }
 
     return data;
 }
 
-async function getFiles(dir, base = dir) {
-    const files = [];
-
-    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
-        const fullPath = path.join(dir, entry.name);
-
-        if (entry.isDirectory()) files.push(...await getFiles(fullPath, base));
-        else if (entry.isFile()) files.push({ path: path.relative(base, fullPath).replaceAll("\\", "/"), fullPath });
-    }
-
-    return files;
+export function gitBlobSha(content) {
+    return createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
 }
 
-async function commitDirectory({ token, repo, dir, message, branch = "main" }) {
-    const files = await getFiles(dir);
+export async function getBranchHead(token, repo, branch) {
+    const reference = await githubRequest(token, `/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`);
+    const commit = await githubRequest(token, `/repos/${repo}/git/commits/${reference.object.sha}`);
+    return { commit: commit.sha, tree: commit.tree.sha };
+}
+
+export async function tagExists(token, repo, tag) {
+    try {
+        await githubRequest(token, `/repos/${repo}/git/ref/tags/${encodeURIComponent(tag)}`);
+        return true;
+    }
+    catch (error) {
+        if (error.status === 404) return false;
+        throw error;
+    }
+}
+
+async function remoteBlobs(token, repo, treeSha) {
+    const tree = await githubRequest(token, `/repos/${repo}/git/trees/${treeSha}?recursive=1`);
+    return new Set((tree?.tree ?? []).filter(entry => entry.type === "blob").map(entry => entry.sha));
+}
+
+export async function commitPackage({ token, repo, branch, parent, files, message }) {
     if (files.length === 0) throw new Error("Package directory is empty");
 
-    const reference = await githubRequest(token, `/repos/${repo}/git/ref/heads/${branch}`);
-    const parentSha = reference.object.sha;
-    const parentCommit = await githubRequest(token, `/repos/${repo}/git/commits/${parentSha}`);
-
+    const existing = await remoteBlobs(token, repo, parent.tree);
     const tree = [];
+
     for (const file of files) {
-        const blob = await githubRequest(token, `/repos/${repo}/git/blobs`, {
-            method: "POST",
-            body: JSON.stringify({ content: await fs.readFile(file.fullPath, "base64"), encoding: "base64" })
-        });
-        tree.push({ path: file.path, mode: "100644", type: "blob", sha: blob.sha });
+        const content = await fs.readFile(file.fullPath);
+        let sha = gitBlobSha(content);
+
+        if (!existing.has(sha)) {
+            const blob = await githubRequest(token, `/repos/${repo}/git/blobs`, {
+                method: "POST",
+                body: JSON.stringify({ content: content.toString("base64"), encoding: "base64" })
+            });
+            sha = blob.sha;
+        }
+
+        tree.push({ path: file.path, mode: "100644", type: "blob", sha });
     }
 
     const newTree = await githubRequest(token, `/repos/${repo}/git/trees`, {
         method: "POST",
-        body: JSON.stringify({ base_tree: parentCommit.tree.sha, tree })
+        body: JSON.stringify({ tree })
     });
+
+    if (newTree.sha === parent.tree) {
+        return { commit: parent.commit, tree: newTree.sha, changed: false };
+    }
 
     const commit = await githubRequest(token, `/repos/${repo}/git/commits`, {
         method: "POST",
-        body: JSON.stringify({ message, tree: newTree.sha, parents: [parentSha] })
+        body: JSON.stringify({ message, tree: newTree.sha, parents: [parent.commit] })
     });
 
-    await githubRequest(token, `/repos/${repo}/git/refs/heads/${branch}`, {
+    await githubRequest(token, `/repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
         method: "PATCH",
         body: JSON.stringify({ sha: commit.sha })
     });
 
-    return { commit: commit.sha, tree: newTree.sha };
-}
-
-export async function publishToGitHub({ token, repo, contentPath, branch = "main" }) {
-    if (!/^[^/]+\/[^/]+$/.test(repo)) {
-        return { success: false, msg: `Invalid GitHub repository: ${repo}` };
-    }
-
-    try {
-        const repository = await githubRequest(token, `/repos/${repo}`);
-        const { commit } = await commitDirectory({ token, repo, dir: contentPath, message: "Publish package", branch });
-
-        return { success: true, msg: `Published ${repo}`, repo: repository.full_name, commit };
-    }
-    catch (error) {
-        return { success: false, msg: error instanceof Error ? error.message : String(error) };
-    }
+    return { commit: commit.sha, tree: newTree.sha, changed: true };
 }
 
 export async function createGitHubTag(token, repo, version, commit) {
@@ -102,22 +109,6 @@ export async function createGitHubTag(token, repo, version, commit) {
             body: JSON.stringify({ ref: `refs/tags/v${version}`, sha: commit })
         });
         return { success: true, tag: `v${version}` };
-    }
-    catch (error) {
-        return { success: false, msg: error instanceof Error ? error.message : String(error) };
-    }
-}
-
-export async function updateGitHubRepo({ token, repo, packagePath, version, message = `Release ${version}` }) {
-    try {
-        const { commit, tree } = await commitDirectory({ token, repo, dir: packagePath, message });
-
-        await githubRequest(token, `/repos/${repo}/git/refs`, {
-            method: "POST",
-            body: JSON.stringify({ ref: `refs/tags/v${version}`, sha: commit })
-        });
-
-        return { success: true, commit, tree, version, tag: `v${version}` };
     }
     catch (error) {
         return { success: false, msg: error instanceof Error ? error.message : String(error) };

@@ -12,9 +12,10 @@ import { loginGitHub } from "./api/github_auth.js";
 import { deleteGitHubToken, getGitHubToken, saveGitHubToken } from "./api/storage.js";
 import { downloadGitHubRepo, getGitHubUser, packageIntegrity } from "./api/github_get.js";
 
-import { getPackage, publishPackage, removePackage, updatePackage } from "./api/spm.js"
+import { getPackage, removePackage } from "./api/spm.js"
 import { readLock, setLockEntry, removeLockEntry } from "./api/lock.js"
-import { createGitHubRepo, createGitHubTag, deleteGitHubRepo, githubHeaders, publishToGitHub, updateGitHubRepo } from "./api/github_req.js";
+import { createGitHubRepo, deleteGitHubRepo } from "./api/github_req.js";
+import { APP_INSTALL_URL, preparePublish, runPublish } from "./api/publish.js";
 
 import open from "open";
 
@@ -404,132 +405,46 @@ spm
 spm
     .command("publish")
 	.argument('<name>')
+	.description("Push the package folder to its GitHub repository, register the version and tag it")
 	.action(async (name) => {
-		if (isPackageExists(name)) {
-			const spmFileContent = await getSPM(name);
-
-			if (!spmFileContent.success) {
-				spmlog(formatError(spmFileContent.content));
-				return;
-			}
-
-			const SPMContent = spmFileContent.content;
-			const packageName = "@" + name;
-
-			const githubRepo = SPMContent.github?.repo
-			const version = SPMContent.version
-			const description = SPMContent.description
-			const packagePath = packageDir(name)
-
-			if (githubRepo) {
-				await loading({
-					startMsg: `Publishing ${packageName}`,
-					callback: async ({ fail, ok }) => {
-						const githubToken = await getGitHubToken()
-
-						const installationsReq = await fetch(
-							"https://api.github.com/user/installations",
-							{
-								headers: githubHeaders(githubToken),
-							},
-						);
-
-						const installations = await installationsReq.json()
-
-						if ("total_count" in installations) {
-							if (installations.total_count == 0) {
-								await open(
-									"https://github.com/apps/slim-package-manager/installations/new",
-								);
-
-								console.log("\n")
-								spmlog(formatError(`No application has been installed on the "${githubRepo}" repository\n`))
-								spmlog("Open:", formatBold.underline("https://github.com/apps/slim-package-manager/installations/new"))
-								spmlog(`Install the app, then run ${formatItalic(`${spm.name()} publish ${name}`)} again\n`)
-
-								return fail(`No application has been installed on the "${githubRepo}" repository`)
-							}
-							else {
-								const githubPublishReq = await publishToGitHub({
-									token: githubToken,
-									repo: githubRepo,
-									contentPath: packagePath
-								})
-
-								if (!githubPublishReq.success) {
-									return fail("Github publish:", githubPublishReq.msg)
-								}
-								else {
-									const isPackagesExists = (await getPackage({ name })).success
-
-									if (isPackagesExists) {
-										console.log("\nPackage is already exists... updating")
-
-										const updatePackageReq = await updatePackage({
-											token: githubToken,
-											name: name,
-											description: description,
-											version: version,
-											github: githubRepo
-										})
-
-										if (!updatePackageReq.success) {
-											return fail("Something went wrong while requesting a package update. Please try again later")
-										}
-										else {
-											console.log("\nUpdating package on Github...")
-
-											const updateReq = await updateGitHubRepo({
-												token: githubToken,
-												repo: githubRepo,
-												packagePath: packagePath,
-												version: updatePackageReq.content.latest
-											})
-
-											if (!updateReq.success) {
-												return fail("Failed to push the new version to GitHub:", updateReq.msg)
-											}
-											else {
-												const publishedVer = updateReq.version
-												return ok(`@${name} ${publishedVer} published on Github`)
-											}
-										}
-									}
-									else {
-										const publishReq = await publishPackage({
-											token: githubToken,
-											name: name,
-											version: version,
-											github: githubRepo,
-											description: description
-										})
-
-										if (!publishReq.success) {
-											return fail("SPM Registry publishing:", publishReq.content)
-										}
-										else {
-											const tagReq = await createGitHubTag(githubToken, githubRepo, version, githubPublishReq.commit)
-											if (!tagReq.success) {
-												return fail(`${packageName} registered, but tagging v${version} on GitHub failed:`, tagReq.msg)
-											}
-											return ok(`${packageName} published and registred: ${name} v${version}`)
-										}
-									}
-								}
-							}
-						}
-						else {
-							return fail("Installations:", installations.message)
-						}
-					}
-				})
-			}
-			else {
-				errlog("No GitHub repository specified");
-			}
-		} else {
+		if (!isPackageExists(name)) {
 			errlog(`No package founded: ${path.relative(process.cwd(), path.join(packagesPath, name)) || name}`);
+			return;
 		}
+
+		const spmFileContent = await getSPM(name);
+
+		if (!spmFileContent.success) {
+			errlog(spmFileContent.content);
+			return;
+		}
+
+		const SPMContent = spmFileContent.content;
+
+		if (!SPMContent.github?.repo) {
+			errlog("No GitHub repository specified");
+			return;
+		}
+
+		await loading({
+			startMsg: `Publishing @${name}`,
+			callback: async ({ fail }) => {
+				const githubToken = await getGitHubToken()
+				const prepared = await preparePublish({ token: githubToken, name, dir: packageDir(name), spm: SPMContent })
+
+				if (!prepared.success) {
+					if (prepared.appMissing) {
+						await open(APP_INSTALL_URL).catch(() => {})
+						console.log("\n")
+						spmlog("Open:", formatBold.underline(APP_INSTALL_URL))
+						spmlog(`Install the app, then run ${formatItalic(`${spm.name()} publish ${name}`)} again\n`)
+					}
+					return fail(prepared.msg)
+				}
+
+				return await runPublish({ token: githubToken, plan: prepared.plan })
+			}
+		})
 	});
 
 spm

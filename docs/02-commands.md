@@ -9,7 +9,7 @@
 | `spm lock` | Shows the versions recorded in `spm.lock.json` | |
 | `spm verify` | Checks that the installed packages still match `spm.lock.json` | |
 | `spm create <name>` | Creates a package | `--local`: a `.spm` in the packages folder; `--github`: the GitHub repository for it; `--github-repo <owner/name>`, `--description <text>`, `--ver <version>`: values for the `.spm` |
-| `spm publish <name>` | Publishes a package to GitHub and the registry, or updates it | |
+| `spm publish <name>` | Publishes a package to GitHub and the registry, or updates it: one commit with exactly the package folder (without `.git`, `node_modules/`, `slim-dist/`, `spm.lock.json` and what `.gitignore` ignores), then the tag `v<version>` | |
 | `spm login` | Connects your GitHub account | `--check`: tells whether you are signed in |
 | `spm logout` | Disconnects your GitHub account | |
 
