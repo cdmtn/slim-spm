@@ -1,6 +1,6 @@
 {
 	"name": "@slim-lang/spm",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Slim Package Manager: installs, locks and publishes Slim packages",
 	"type": "module",
 	"repository": {
